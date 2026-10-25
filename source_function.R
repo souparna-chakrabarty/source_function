@@ -282,7 +282,8 @@ local({
 
   source_function_status <- function() {
     list(protocol = 1L, gateway = if (is.null(state$endpoint)) endpoint() else state$endpoint,
-         distribution_revision = state$revision, source_revision = state$source_revision,
+         repository_revision = state$revision, distribution_revision = state$revision,
+         source_revision = state$source_revision,
          registered_count = length(ls(state$registered, all.names = TRUE)),
          cached_count = length(ls(state$cache, all.names = TRUE)),
          bundle_downloads = state$downloads, disk_cache = FALSE)
