@@ -1,78 +1,44 @@
 # source_function
 
-Unified public loader for functions in private `RIsyFun`. No public catalogue of function names.
+Public, name-based R loader for approved functions stored in the private `souparna-chakrabarty/RIsyFun` repository. Function names are not enumerated publicly.
 
-## Standard usage
+## Usage
 
 ```r
 source("https://raw.githubusercontent.com/souparna-chakrabarty/source_function/main/source_function.R", local = TRUE)
 source_function("known_function.R")
+# Then invoke that known function normally in the same R session.
 ```
 
+The loader accepts a function name with or without `.R`. Multiple known names may be registered as a character vector. Registration is lazy: it creates lightweight wrappers but does not download implementation code.
 
-A caller must already know the exact name. Accepts names with or without `.R`.
-Registration creates a small forwarding wrapper, without downloading implementation.
-At first execution, the loader requests one bundle containing its dependency closure
-from the Hetzner gateway. This bundle is assembled by the **existing private**
-`Functions/RIsyFun.R` dependency resolver at an immutable Git commit of `main`.
-The function executes on the caller’s R session with local inputs and is held in
-the session-memory cache. Subsequent calls do not download it again.
-No original R source, function directory listing, GitHub credentials, inputs, or results
-are sent through the public GitHub loader. The gateway sees the name and revision.
+On first invocation, a wrapper requests its approved, version-pinned bundle via Hetzner from private GitHub. The private `Functions/RIsyFun.R` resolves dependencies, and the implementation executes locally. Subsequent calls reuse the implementation cached **in memory**. Function arguments and results are not sent to Hetzner.
 
-## Compatibility with the previous source_github loader
-
-The same `source_function.R` file also defines `source_github()` using the API
-of the older public `source_github` repository. No second public script is
-required for callers of the unified loader.
+## Refresh
 
 ```r
-# For repository owners/collaborators who already possess GitHub access:
-source_function("known_function.R", backend = "github", cache = FALSE)
-
-# Existing general API remains available:
-source_github(owner = "owner", repo = "repo", dir = "Functions",
-              file = "RIsyFun.R", fun = "RIsyFun", include = "known_function.R")
+source_function("known_function.R", refresh = TRUE)
+source_function(character(0), refresh = TRUE) # Refresh registered wrappers without specifying names.
 ```
 
-`backend = "github"` delegates to the original `RIsyFun.R` with its normal
-sourcing semantics. It requires private-repository credentials **on the caller’s
-machine**. It is explicitly optional; regular clients use the default gateway.
-Only `backend = "github"` preserves the original `cache = TRUE` disk-source cache.
-For `backend = "gateway"`, the cache is memory-only and `cache = TRUE` merely warns.
-No token is embedded in the public code. The separate public `source_github`
-repository is left intact for existing scripts but is not needed by this loader.
+`refresh = TRUE` invalidates the loader's entire memory cache and pinned revision. The next invocation retrieves the latest private GitHub revision. Existing wrappers remain registered and download new implementations on demand. Previously copied or returned function objects cannot be updated retroactively.
 
-## Controls
+## Precedence and collision warnings
 
-```r
-source_function_status()
-clear_function_cache()
-clear_function_cache(refresh = TRUE)
-source_function("known_function", attach_env = FALSE, force = TRUE)
-```
+When a requested name already exists in `.GlobalEnv`, RIsyFun takes precedence. The loader preserves the original global value privately, installs its RIsyFun wrapper into `.GlobalEnv`, and emits a warning listing the displaced names. Locked or active global bindings cannot be replaced. Registering the same wrapper again does not cause repeated warnings.
 
-Default `attach_env = TRUE` registers wrappers in `package:RIsyFun`;
-`FALSE` registers in `.GlobalEnv`. A pre-existing object in `.GlobalEnv` can
-shadow an attached wrapper; use a fresh session when migrating.
-`force = TRUE` replaces a binding in the selected target environment.
-`source_function_status()` includes `repository_revision` (the pinned private main
-commit) and a deprecated `distribution_revision` alias for older code.
+Because `.GlobalEnv` is searched before attached environments, replacing the binding is necessary to guarantee precedence. Be cautious when registering a name that also identifies a global data object. The loader reserves the name `source_function` for itself.
 
-## Privacy, compatibility, and availability
+## Privacy and availability
 
-No public listing or manifest endpoint exists. Name-based access **is not
-authentication**: a function name may be guessed. Downloaded executable R objects
-can be reconstructed and inspected by their recipients; this offers only casual
-source concealment, not encryption or secure source-code protection.
-Source comments and source references are omitted from gateway bundles.
-Saving an R workspace may persist in-memory implementations.
+There is no public function catalogue or listing endpoint. Access is by exact name, not identity; names can be guessed. Hetzner uses one **server-only**, read-only private GitHub credential; the user needs none.
 
-R 4.1+ and libcurl/HTTPS are required for the gateway mode.
-The first invocation requires that the gateway is reachable and its one
-server-side GitHub credential is correctly configured. Already-loaded functions
-can run even when the gateway is offline.
-The gateway preserves one source revision per R session and resolves dependencies
-through `Functions/RIsyFun.R`. No separate distribution branch is used.
-The gateway service and SSL route must be activated before public users can
-successfully download a private implementation.
+The client receives source-stripped R bundles instead of plaintext `.R` files. This is a barrier to casual inspection, **not** a guarantee of secrecy: anyone controlling their own R session can capture or inspect an implementation.
+
+The first invocation requires Hetzner and private GitHub to be reachable. Already cached functions can run while the gateway is unavailable. The loader does not intentionally cache bundles on disk, although saved R workspaces can preserve implementations. Requires R 4.1+ with libcurl/HTTPS support.
+
+The separate public `source_github` repository remains unchanged for callers who need direct authenticated GitHub sourcing. This public `source_function.R` contains only the gateway client.
+
+## Deployment
+
+Function retrieval requires one restricted GitHub credential installed privately on Hetzner and a functional HTTPS gateway at `https://risyfun.chakrabarty.org`. The server code is maintained in the private `RIsyFun` repository.
