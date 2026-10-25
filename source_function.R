@@ -11,6 +11,112 @@ local({
   state$endpoint <- NULL
   state$downloads <- 0L
 
+  # Authenticated legacy backend, consolidated from public source_github.R.
+  source_github <- function(owner = NULL, repo = NULL, ref = "main", dir = NULL, file = NULL, path = NULL, fun = NULL, helpers_dir = NULL, ..., expose = NULL, export_env = .GlobalEnv, private_parent = .GlobalEnv) {
+    # --- small helpers ----------------------------------------------------------
+    nz <- function(x) is.character(x) && length(x) == 1 && nzchar(x)
+  
+    # Allow repo = "owner/repo" when owner = NULL
+    if (is.null(owner) && nz(repo) && grepl("/", repo, fixed = TRUE)) {
+      parts <- strsplit(repo, "/", fixed = TRUE)[[1]]
+      if (length(parts) == 2) {
+        owner <- parts[1]
+        repo  <- parts[2]
+      }
+    }
+  
+    # Validate required args
+    if (!nz(owner)) stop("`owner` must be a non-empty string (or provide `repo` as 'owner/repo').")
+    if (!nz(repo)) stop("`repo` must be a non-empty string (e.g., 'xyz').")
+    if (!nz(ref)) stop("`ref` must be a non-empty string (branch, tag, or commit SHA).")
+    if (!is.environment(export_env)) stop("`export_env` must be an environment.")
+    if (!is.environment(private_parent)) stop("`private_parent` must be an environment.")
+  
+    # Compose path if not given
+    if (is.null(path)) {
+      if (!nz(file)) stop("`file` must be a non-empty string when `path` is NULL.")
+      if (!nz(dir))  stop("`dir` must be a non-empty string when `path` is NULL.")
+      path <- file.path(dir, file)
+    }
+  
+    # Ensure gh (and optional gitcreds) are available
+    if (!requireNamespace("gh", quietly = TRUE)) utils::install.packages("gh")
+    # Use PAT from gitcreds if we don't already have one (needed for private repos)
+    if (!nzchar(Sys.getenv("GITHUB_PAT")) && requireNamespace("gitcreds", quietly = TRUE)) {
+      tok <- tryCatch(gitcreds::gitcreds_get()$password, error = function(e) "")
+      if (nzchar(tok)) Sys.setenv(GITHUB_PAT = tok)
+    }
+  
+    # 1) Fetch the loader file (raw text)
+    txt <- tryCatch(
+      gh::gh("GET /repos/{owner}/{repo}/contents/{path}", owner = owner, repo = repo, path = path, ref = ref, .accept = "application/vnd.github.v3.raw"),
+      error = function(e) {
+        stop(
+          "Failed to fetch loader file '", path, "' from ", owner, "/", repo,
+          " (ref '", ref, "').\n• ", conditionMessage(e),
+          "\n• Check the path/branch and that your token (if needed) has access."
+        )
+      }
+    )
+    src <- if (is.raw(txt)) rawToChar(txt) else as.character(txt)
+  
+    # 2) Evaluate loader in a sandbox, so nothing leaks into your session
+    env <- new.env(parent = baseenv())
+    con <- textConnection(src, encoding = "UTF-8")
+    on.exit(close(con), add = TRUE)
+    base::source(con, local = env, keep.source = FALSE)
+  
+    if (!exists(fun, envir = env, mode = "function")) {
+      stop("The loader file '", path, "' did not define a function named '", fun, "()'.")
+    }
+    loader <- get(fun, envir = env, inherits = FALSE)
+  
+    # 3) Create PRIVATE env for all helpers + deps
+    private <- new.env(parent = private_parent)
+  
+    # 4) Prepare args for the loader; force into = private, propagate owner/repo/ref/path if not supplied
+    args <- list(...)
+    args$into <- private
+    if (is.null(args$scan_requires)) args$scan_requires <- TRUE
+    if (is.null(args$owner)) args$owner <- owner
+    if (is.null(args$repo)) args$repo <- repo
+    if (is.null(args$ref)) args$ref <- ref
+    # If the loader accepts a `path` argument: use explicit helpers_dir; otherwise infer from path or dir
+    if (is.null(args$path)) {
+      if (nz(helpers_dir)) {
+        args$path <- helpers_dir
+      } else {
+        d <- dirname(path)
+        if (identical(d, ".") || !nzchar(d)) d <- dir
+        args$path <- d
+      }
+    }
+  
+    # 5) Call the loader (loads requested files + dependencies into 'private')
+    do.call(loader, args)
+  
+    # 6) Decide what to expose (if not provided, infer from include by stripping ".R")
+    if (is.null(expose) && !is.null(args$include)) {
+      guess <- sub("\\.R$", "", unlist(args$include, use.names = FALSE))
+      expose <- intersect(guess, ls(private, all.names = FALSE))
+    }
+  
+    # 7) Expose selected symbols into export_env (dependencies remain hidden in 'private')
+    if (length(expose)) {
+      if (!is.character(expose)) stop("`expose` must be a character vector of function names to export.")
+      invisible(lapply(expose, function(nm) {
+        if (!exists(nm, envir = private, inherits = FALSE)) {
+          warning(sprintf("'%s' not found in private env; available: %s", nm, paste(ls(private), collapse = ", ")))
+        } else {
+          assign(nm, get(nm, envir = private, inherits = FALSE), envir = export_env)
+        }
+      }))
+    }
+  
+    # Return the private namespace (invisible) for advanced use
+    invisible(private)
+  }
+  
   endpoint <- function() {
     value <- getOption("RIsyFun.gateway", "https://risyfun.chakrabarty.org")
     if (!is.character(value) || length(value) != 1L || is.na(value))
@@ -119,7 +225,7 @@ local({
     target
   }
 
-  source_function <- function(functions, attach_env = TRUE, cache = FALSE, force = FALSE) {
+  source_function <- function(functions, attach_env = TRUE, cache = FALSE, force = FALSE, backend = getOption("RIsyFun.backend", "gateway")) {
     if (!is.character(functions) || anyNA(functions))
       stop("functions must be a character vector of exact function names.", call. = FALSE)
     check_flag <- function(x) is.logical(x) && length(x) == 1L && !is.na(x)
@@ -129,12 +235,29 @@ local({
     if (!length(names)) return(invisible(NULL))
     if (length(names) > 100L || any(!grepl("^[A-Za-z][A-Za-z0-9_.]{0,99}$", names)))
       stop("Use exact function names, optionally ending in .R; paths are not accepted.", call. = FALSE)
-    if (cache)
-      warning("cache is retained for compatibility. Only in-memory caching is supported; ",
-              "nothing is deliberately cached to disk.", call. = FALSE)
+    if (!is.character(backend) || length(backend) != 1L || is.na(backend) ||
+        !backend %in% c("gateway", "github"))
+      stop("backend must be gateway or github.", call. = FALSE)
     target <- target_environment(attach_env)
     needed <- if (force) names else names[!vapply(names, exists, logical(1),
                                                 envir = target, inherits = FALSE, mode = "function")]
+    if (!length(needed)) return(invisible(NULL))
+    if (identical(backend, "github")) {
+      # The pre-existing public source_github() calls the original private RIsyFun.R.
+      # The user must already hold their own GitHub credential; none is embedded here.
+      source_github(owner = "souparna-chakrabarty", repo = "RIsyFun",
+                    dir = "Functions", file = "RIsyFun.R", fun = "RIsyFun",
+                    include = paste0(needed, ".R"), attach_env = FALSE,
+                    cache = cache, expose = needed, export_env = target)
+      invisible(lapply(needed, function(name) {
+        assign(name, TRUE, envir = state$registered)
+        invisible(NULL)
+      }))
+      return(invisible(NULL))
+    }
+    if (cache)
+      warning("cache is retained for compatibility. Only in-memory caching is supported; ",
+              "nothing is deliberately cached to disk.", call. = FALSE)
     invisible(lapply(needed, function(name) {
       assign(name, make_wrapper(name), envir = target)
       assign(name, TRUE, envir = state$registered)
@@ -165,6 +288,7 @@ local({
          bundle_downloads = state$downloads, disk_cache = FALSE)
   }
 
+  assign("source_github", source_github, envir = export_into)
   assign("source_function", source_function, envir = export_into)
   assign("clear_function_cache", clear_function_cache, envir = export_into)
   assign("source_function_status", source_function_status, envir = export_into)

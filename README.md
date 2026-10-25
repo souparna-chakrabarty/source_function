@@ -52,3 +52,35 @@ A function's first invocation needs the gateway and GitHub to be reachable. Alre
 cached functions do not. Unknown names fail when first invoked, not at registration.
 Each session pins one immutable distribution commit. New functions are published only
 when explicitly included in the private allowlist; there is no automatic directory exposure.
+
+## Consolidated loader and migration compatibility
+
+The same public `source_function.R` now contains both the previously separate
+generic `source_github()` API and the `source_function()` convenience API.
+No external `source_github` bootstrap is required to use the consolidated script.
+
+```r
+source("https://raw.githubusercontent.com/souparna-chakrabarty/source_function/main/source_function.R", local = TRUE)
+source_function("known_function.R")                # Gateway mode (default); no GitHub token needed
+source_function("known_function.R", backend = "github")  # Explicit authenticated legacy mode
+```
+
+`backend = "github"` delegates **unchanged dependency sourcing** to the
+existing private `Functions/RIsyFun.R`. It requires the calling user to have
+their **own** GitHub access to that private repository, obtained through the
+existing `gh`/`gitcreds` workflow; the public file never contains a credential.
+It retains the original `cache` flag: `cache = TRUE` uses the existing local
+RIsyFun disk cache, while `cache = FALSE` sources directly into memory.
+
+`backend = "gateway"` retains the name-based, first-use remote retrieval and
+session-only cache. At the time of consolidation, this still uses the
+temporary private distribution branch; it is not yet the unified production
+path. A later stage will attach this mode to the original private `RIsyFun.R`
+and retire the distribution branch after end-to-end verification.
+
+The standalone public `source_github` repository remains intact for callers
+that already source it. Its API is now also available by sourcing this script.
+
+**Mixed-session caution:** do not load both backends into the same target
+environment for the same function without deliberate `force = TRUE`; run in a
+fresh R session while migrating.
